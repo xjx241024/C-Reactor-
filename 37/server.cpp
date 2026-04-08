@@ -24,7 +24,7 @@ int main(int argc, char *argv[])
     signal(SIGTERM, stop);  // 信号15，kill或killall命令的默认发送信号
     signal(SIGINT, stop);   // 信号2，ctrl+c
 
-    echoServer = new EchoServer(argv[1], atoi(argv[2]), 3, 0);
+    echoServer = new EchoServer(argv[1], atoi(argv[2]), 3, 0);  // 简单的回显业务，工作线程池少运行更快
     echoServer->start();
 
     return 0;

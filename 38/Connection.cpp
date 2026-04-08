@@ -1,8 +1,9 @@
 #include "Connection.h"
 
 // 用智能指针后，原本的赋值函数删除了，要使用移动语义
-Connection::Connection(EventLoop *loop, std::unique_ptr<Socket> socket)
-           : loop_(loop), connectionSocket_(std::move(socket)), disconnect_(false), connectionChannel_(new Channel(loop_, connectionSocket_->Sockfd()))
+Connection::Connection(EventLoop *loop, std::unique_ptr<Socket> socket, uint16_t seq)
+    : seq_(seq), inputBuffer_(seq_), outputBuffer_(seq_), loop_(loop),
+      connectionSocket_(std::move(socket)), disconnect_(false), connectionChannel_(new Channel(loop_, connectionSocket_->Sockfd()))
 {
     // connectionChannel_ = new Channel(loop_, connectionSocket_->Sockfd()); // 用新连接的fd来构造一个Channel对象。
     // clientChannel只能new出来，不能在栈上，否则析构函数会关闭fd
@@ -19,7 +20,7 @@ Connection::~Connection()
     // delete connectionChannel_;
     // delete connectionSocket_;
     // Channel中new了一个clientSock，但没有释放，由于clientSock的生命周期和Connection一样，所以在Connection的析构函数中释放它。
-    printf("conn已经被释放\n");
+    // printf("conn已经被释放\n");
 }
 
 int Connection::fd() const
@@ -40,7 +41,7 @@ uint16_t Connection::port() const
 void Connection::closeCallback()
 {
     disconnect_ = true;
-    connectionChannel_->removeChannel();    // 从事件循环中删除Channel
+    connectionChannel_->removeChannel(); // 从事件循环中删除Channel
     // 使用了智能指针，所以用shared_from_this()代替this
     closeCallback_(shared_from_this()); // 连接关闭(断开)时的回调函数，调用它来处理连接关闭。
 }
@@ -48,8 +49,8 @@ void Connection::closeCallback()
 void Connection::errorCallback()
 {
     disconnect_ = true;
-    connectionChannel_->removeChannel();    // 从事件循环中删除Channel
-    errorCallback_(shared_from_this()); // 连接发生错误时的回调函数，调用它来处理连接错误。
+    connectionChannel_->removeChannel(); // 从事件循环中删除Channel
+    errorCallback_(shared_from_this());  // 连接发生错误时的回调函数，调用它来处理连接错误。
 }
 
 void Connection::setCloseCallback(std::function<void(spConnection)> cb)
@@ -94,17 +95,12 @@ void Connection::onMessage()
         {
             while (true)
             {
-                // 现在使用的是指定报文长度的协议，先读取报文头部，获取报文内容的长度，然后再读取报文内容。
-                int len = 0;
-                memcpy(&len, inputBuffer_.data(), 4); // 从输入缓冲区中读取报文头部。
-                if (inputBuffer_.size() < len + 4)
+                std::string content;
+                if (inputBuffer_.pickMessage(content) == false)
                     break;
-                std::string content(inputBuffer_.data() + 4, len); // 从输入缓冲区中读取报文内容，构造一个字符串对象。
-                inputBuffer_.erase(0, 4 + len);                    // 从输入缓冲区中删除已经处理过的数据，删除的长度是报文头部的长度加上报文内容的长度。
 
-                printf("message(eventfd=%d)%s\n", fd(), content.c_str());
-                lastTime_ = Timestamp::now();   // 报文接收之后，发送之前，更新时间戳
-                // std::cout << "lastTime = " << lastTime_.tostring() << std::endl;    // 测试代码
+                lastTime_ = Timestamp::now();                                    // 报文接收之后，发送之前，更新时间戳
+                // std::cout << "lastTime = " << lastTime_.toString() << std::endl; // 测试代码
 
                 onMessageCallback_(shared_from_this(), content); // 调用处理消息的回调函数。
             }
@@ -122,7 +118,7 @@ void Connection::onMessage()
 
 void Connection::send(const char *msg, size_t len)
 {
-    if(disconnect_ == true)
+    if (disconnect_ == true)
     {
         printf("客户端连接已断开, 不发送数据\n");
         return;
@@ -130,8 +126,7 @@ void Connection::send(const char *msg, size_t len)
 
     std::shared_ptr<std::string> message(new std::string(msg));
 
-
-    if(loop_->isLoopThread())   // 判断当前线程是否是事件循环线程(IO线程)
+    if (loop_->isLoopThread()) // 判断当前线程是否是事件循环线程(IO线程)
     {
         // printf("send()在IO线程中执行\n");
         sendInLoop(message);
@@ -143,22 +138,21 @@ void Connection::send(const char *msg, size_t len)
         // 调用EventLoop::queueInLoop()，让事件循环线程发送
         loop_->queueInLoop(std::bind(&Connection::sendInLoop, shared_from_this(), message));
     }
-
 }
 
-/* 
+/*
 void Connection::sendInLoop(const char *msg, size_t len)
 {
     outputBuffer_.appendMessage(msg, len);      // 把要发送的数据（报文头部+报文内容）添加到输出缓冲区。
     connectionChannel_->enablewriting(); // 注册写事件
     // 一旦socket可写立刻发送数据。
-} 
+}
 */
 
 void Connection::sendInLoop(std::shared_ptr<std::string> msg)
 {
-    outputBuffer_.appendMessage(msg->data(), msg->size());  // 把需要发送的数据放入发送缓冲区
-    connectionChannel_->enablewriting();    // 注册写事件
+    outputBuffer_.appendWithSeq(msg->data(), msg->size()); // 把需要发送的数据放入发送缓冲区
+    connectionChannel_->enablewriting();                   // 注册写事件
 }
 
 void Connection::writeCallback()
@@ -175,7 +169,7 @@ void Connection::writeCallback()
     }
 }
 
- bool Connection::timeOut(time_t now,int val)           
- {
-    return now-lastTime_.toint()>val;    // 大于val则认为超时
- }
+bool Connection::timeOut(time_t now, int val)
+{
+    return now - lastTime_.toInt() > val; // 大于val则认为超时
+}
